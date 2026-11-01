@@ -60,23 +60,37 @@ function isStale(ts: string | undefined, maxSeconds = 120) {
 function Card({
   title,
   stale,
+  loading,
   children,
 }: {
   title: string;
   stale?: boolean;
+  loading?: boolean;
   children: React.ReactNode;
 }) {
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-4 shadow-sm">
       <div className="mb-2 flex items-center justify-between">
         <h2 className="text-sm font-medium text-zinc-400">{title}</h2>
-        {stale && (
-          <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-xs text-amber-400">
-            sin datos recientes
-          </span>
+        {loading ? (
+          <span className="h-2 w-2 animate-pulse rounded-full bg-sky-400" />
+        ) : (
+          stale && (
+            <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-xs text-amber-400">
+              sin datos recientes
+            </span>
+          )
         )}
       </div>
-      {children}
+      {loading ? (
+        <div className="animate-pulse space-y-2">
+          <div className="h-6 w-24 rounded bg-zinc-800" />
+          <div className="h-3 w-32 rounded bg-zinc-800" />
+          <div className="h-3 w-20 rounded bg-zinc-800" />
+        </div>
+      ) : (
+        children
+      )}
     </div>
   );
 }
@@ -87,6 +101,13 @@ export default function Home() {
   const [model, setModel] = useState<ModelRow>();
   const [services, setServices] = useState<ServiceRow[]>([]);
   const [events, setEvents] = useState<EventRow[]>([]);
+  const [, setTick] = useState(0);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const tickInterval = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(tickInterval);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -110,10 +131,11 @@ export default function Home() {
       }
       setServices(Array.from(latestByService.values()));
       setEvents((evtRes.data ?? []) as EventRow[]);
+      setLoading(false);
     }
 
     load();
-    const interval = setInterval(load, 5000);
+    const interval = setInterval(load, 2000);
     return () => {
       cancelled = true;
       clearInterval(interval);
@@ -125,9 +147,9 @@ export default function Home() {
       <h1 className="mb-6 text-xl font-semibold">✦ Hermes Stars</h1>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        <Card title="Modelo local" stale={isStale(model?.ts)}>
+        <Card title="Modelo local" stale={isStale(model?.ts)} loading={loading}>
           <p className="text-2xl font-bold">
-            {model?.tok_s != null ? `${model.tok_s.toFixed(1)} tok/s` : "—"}
+            {model?.tok_s ? `${model.tok_s.toFixed(1)} tok/s` : "inactivo"}
           </p>
           <p className="text-sm text-zinc-400">
             Contexto: {model?.ctx_used ?? "—"} / {model?.ctx_total ?? "—"}
@@ -136,7 +158,7 @@ export default function Home() {
           <p className="mt-1 text-xs text-zinc-500">{timeAgo(model?.ts)}</p>
         </Card>
 
-        <Card title="GPU" stale={isStale(gpu?.ts)}>
+        <Card title="GPU" stale={isStale(gpu?.ts)} loading={loading}>
           <p className="text-2xl font-bold">{gpu?.util_pct != null ? `${gpu.util_pct}%` : "—"}</p>
           <p className="text-sm text-zinc-400">
             VRAM: {gpu?.vram_used_mb ?? "—"} / {gpu?.vram_total_mb ?? "—"} MB
@@ -148,7 +170,7 @@ export default function Home() {
           <p className="mt-1 text-xs text-zinc-500">{timeAgo(gpu?.ts)}</p>
         </Card>
 
-        <Card title="PC (CPU / RAM)" stale={isStale(system?.ts)}>
+        <Card title="PC (CPU / RAM)" stale={isStale(system?.ts)} loading={loading}>
           <p className="text-2xl font-bold">
             {system?.cpu_pct != null ? `${system.cpu_pct}% CPU` : "—"}
           </p>
@@ -158,7 +180,7 @@ export default function Home() {
           <p className="mt-1 text-xs text-zinc-500">{timeAgo(system?.ts)}</p>
         </Card>
 
-        <Card title="Servicios" stale={services.length === 0}>
+        <Card title="Servicios" stale={services.length === 0} loading={loading}>
           <ul className="space-y-1 text-sm">
             {services.length === 0 && <li className="text-zinc-500">sin datos</li>}
             {services.map((s) => (
@@ -180,7 +202,7 @@ export default function Home() {
           </ul>
         </Card>
 
-        <Card title="Eventos en vivo" stale={events.length === 0}>
+        <Card title="Eventos en vivo" stale={events.length === 0} loading={loading}>
           <ul className="max-h-64 space-y-1 overflow-y-auto text-sm">
             {events.length === 0 && <li className="text-zinc-500">sin eventos</li>}
             {events.map((e, i) => (

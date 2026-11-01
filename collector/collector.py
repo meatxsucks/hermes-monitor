@@ -16,7 +16,8 @@ SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 GATEWAY_LOG = Path(os.environ.get("HERMES_GATEWAY_LOG", str(Path.home() / ".hermes/logs/gateway.log")))
 LLAMA_HEALTH_URL = os.environ.get("LLAMA_HEALTH_URL", "http://127.0.0.1:8081/health")
 LLAMA_METRICS_URL = os.environ.get("LLAMA_METRICS_URL", "http://127.0.0.1:8081/metrics")
-POLL_INTERVAL = float(os.environ.get("COLLECTOR_POLL_INTERVAL", "10"))
+LLAMA_SLOTS_URL = os.environ.get("LLAMA_SLOTS_URL", "http://127.0.0.1:8081/slots")
+POLL_INTERVAL = float(os.environ.get("COLLECTOR_POLL_INTERVAL", "3"))
 PENDING_NOTICE_EVERY = 30  # segundos entre avisos de "esperando respuesta"
 
 sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
@@ -125,20 +126,27 @@ def collect_model() -> None:
         status = "down"
 
     tok_s = None
-    ctx_used = None
-    ctx_total = None
     try:
         with urllib.request.urlopen(LLAMA_METRICS_URL, timeout=5) as resp:
             text = resp.read().decode()
         for line in text.splitlines():
             if line.startswith("llamacpp:predicted_tokens_seconds"):
                 tok_s = float(line.rsplit(" ", 1)[1])
-            elif line.startswith("llamacpp:kv_cache_used_cells"):
-                ctx_used = int(float(line.rsplit(" ", 1)[1]))
-            elif line.startswith("llamacpp:kv_cache_max_cells"):
-                ctx_total = int(float(line.rsplit(" ", 1)[1]))
     except Exception:
         pass  # /metrics puede no estar habilitado; status ya quedó seteado
+
+    ctx_used = None
+    ctx_total = None
+    try:
+        with urllib.request.urlopen(LLAMA_SLOTS_URL, timeout=5) as resp:
+            import json
+
+            slots = json.loads(resp.read().decode())
+        if slots:
+            ctx_used = slots[0].get("n_prompt_tokens")
+            ctx_total = slots[0].get("n_ctx")
+    except Exception:
+        pass  # /slots puede no estar habilitado (--no-slots)
 
     insert(
         "model_metrics",

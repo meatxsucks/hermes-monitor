@@ -1,1 +1,1 @@
-supabase==2.12.0
+supabase>=2.33.0
