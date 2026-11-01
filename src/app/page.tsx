@@ -122,7 +122,7 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-zinc-950 px-4 py-6 text-zinc-100">
-      <h1 className="mb-6 text-xl font-semibold">Orión — Hermes Monitor</h1>
+      <h1 className="mb-6 text-xl font-semibold">✦ Hermes Stars</h1>
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <Card title="Modelo local" stale={isStale(model?.ts)}>

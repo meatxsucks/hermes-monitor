@@ -1,0 +1,14 @@
+[Unit]
+Description=hermes-monitor collector - sube métricas de Orión a Supabase
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/almacenamiento/OneDrive/Documentos/GithubProyects/hermes-monitor/collector
+EnvironmentFile=/mnt/almacenamiento/OneDrive/Documentos/GithubProyects/hermes-monitor/collector/.env
+ExecStart=/mnt/almacenamiento/OneDrive/Documentos/GithubProyects/hermes-monitor/collector/venv/bin/python collector.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
