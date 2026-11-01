@@ -25,6 +25,8 @@ type ModelRow = {
   ctx_used: number | null;
   ctx_total: number | null;
   status: string | null;
+  activity: string | null;
+  prompt_progress: number | null;
 };
 
 type ServiceRow = {
@@ -50,6 +52,19 @@ function timeAgo(ts: string | undefined) {
   if (m < 60) return `hace ${m}m`;
   const h = Math.floor(m / 60);
   return `hace ${h}h`;
+}
+
+function modelActivityLabel(model: ModelRow | undefined) {
+  if (!model) return "—";
+  if (model.status !== "ok") return model.status === "loading" ? "Cargando modelo…" : "Apagado";
+  if (model.activity === "prompt") {
+    const pct = model.prompt_progress != null ? ` ${Math.round(model.prompt_progress * 100)}%` : "";
+    return `Leyendo contexto…${pct}`;
+  }
+  if (model.activity === "generating") {
+    return model.tok_s ? `Generando · ${model.tok_s.toFixed(1)} tok/s` : "Generando…";
+  }
+  return "En espera";
 }
 
 function isStale(ts: string | undefined, maxSeconds = 120) {
@@ -149,7 +164,7 @@ export default function Home() {
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
         <Card title="Modelo local" stale={isStale(model?.ts)} loading={loading}>
           <p className="text-2xl font-bold">
-            {model?.tok_s ? `${model.tok_s.toFixed(1)} tok/s` : "inactivo"}
+            {modelActivityLabel(model)}
           </p>
           <p className="text-sm text-zinc-400">
             Contexto: {model?.ctx_used ?? "—"} / {model?.ctx_total ?? "—"}

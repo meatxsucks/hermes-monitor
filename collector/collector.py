@@ -137,20 +137,42 @@ def collect_model() -> None:
 
     ctx_used = None
     ctx_total = None
+    activity = None
+    prompt_progress = None
     try:
         with urllib.request.urlopen(LLAMA_SLOTS_URL, timeout=5) as resp:
             import json
 
             slots = json.loads(resp.read().decode())
         if slots:
-            ctx_used = slots[0].get("n_prompt_tokens")
-            ctx_total = slots[0].get("n_ctx")
+            slot = slots[0]
+            ctx_used = slot.get("n_prompt_tokens")
+            ctx_total = slot.get("n_ctx")
+            n_decoded = (slot.get("next_token") or [{}])[0].get("n_decoded", 0)
+            if not slot.get("is_processing"):
+                activity = "idle"
+            elif n_decoded > 0:
+                activity = "generating"
+            else:
+                activity = "prompt"
+                total = slot.get("n_prompt_tokens") or 0
+                done = (slot.get("n_prompt_tokens_cache") or 0) + (slot.get("n_prompt_tokens_processed") or 0)
+                if total > 0:
+                    prompt_progress = round(min(done / total, 1.0), 3)
     except Exception:
         pass  # /slots puede no estar habilitado (--no-slots)
 
     insert(
         "model_metrics",
-        {"ts": now_iso(), "tok_s": tok_s, "ctx_used": ctx_used, "ctx_total": ctx_total, "status": status},
+        {
+            "ts": now_iso(),
+            "tok_s": tok_s,
+            "ctx_used": ctx_used,
+            "ctx_total": ctx_total,
+            "status": status,
+            "activity": activity,
+            "prompt_progress": prompt_progress,
+        },
     )
     set_service_status("llm (modelo local)", "ok" if status == "ok" else "warn" if status == "loading" else "down")
 
@@ -211,6 +233,8 @@ class LogTailer:
         if self.pending_since and now - self.last_pending_notice > PENDING_NOTICE_EVERY:
             for platform, started in self.pending_since.items():
                 elapsed = int(now - started)
+                if elapsed < PENDING_NOTICE_EVERY:
+                    continue
                 emit_event(
                     "thinking",
                     f"Orión está pensando en {platform} hace {elapsed}s",
