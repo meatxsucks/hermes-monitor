@@ -2,23 +2,31 @@
 """Recolector local para hermes-monitor: lee métricas del PC/GPU/modelo/Hermes
 y las escribe en Supabase. Nunca sube contenido de mensajes, solo metadata."""
 
+import json
 import os
 import re
 import subprocess
 import time
-from datetime import datetime, timezone
+import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from supabase import create_client
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-GATEWAY_LOG = Path(os.environ.get("HERMES_GATEWAY_LOG", str(Path.home() / ".hermes/logs/gateway.log")))
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY", "")
+HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
+GATEWAY_LOG = Path(os.environ.get("HERMES_GATEWAY_LOG", str(HERMES_HOME / "logs/gateway.log")))
+AGENT_LOG = Path(os.environ.get("HERMES_AGENT_LOG", str(HERMES_HOME / "logs/agent.log")))
+HERMES_CONFIG = Path(os.environ.get("HERMES_CONFIG", str(HERMES_HOME / "config.yaml")))
 LLAMA_HEALTH_URL = os.environ.get("LLAMA_HEALTH_URL", "http://127.0.0.1:8081/health")
 LLAMA_METRICS_URL = os.environ.get("LLAMA_METRICS_URL", "http://127.0.0.1:8081/metrics")
 LLAMA_SLOTS_URL = os.environ.get("LLAMA_SLOTS_URL", "http://127.0.0.1:8081/slots")
 POLL_INTERVAL = float(os.environ.get("COLLECTOR_POLL_INTERVAL", "3"))
+CLOUD_POLL_INTERVAL = float(os.environ.get("COLLECTOR_CLOUD_POLL_INTERVAL", "60"))
 PENDING_NOTICE_EVERY = 30  # segundos entre avisos de "esperando respuesta"
+DEFAULT_COMPRESS_THRESHOLD = 55705
 
 sb = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
@@ -42,8 +50,14 @@ def emit_event(kind: str, message: str, severity: str = "info") -> None:
     insert("events", {"ts": now_iso(), "kind": kind, "message": message, "severity": severity})
 
 
+def http_get(url: str, headers: dict | None = None, timeout: float = 5) -> str:
+    req = urllib.request.Request(url, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode()
+
+
 # ---------------------------------------------------------------------------
-# GPU / sistema / modelo
+# GPU / sistema
 # ---------------------------------------------------------------------------
 
 def collect_gpu() -> None:
@@ -114,66 +128,108 @@ def collect_system() -> None:
         print(f"[collector] system collection failed: {exc}")
 
 
-def collect_model() -> None:
-    import urllib.request
+# ---------------------------------------------------------------------------
+# Modelo local: actividad y velocidades reales medidas entre muestras
+# ---------------------------------------------------------------------------
 
+class ModelTracker:
+    """Sigue la tarea activa de llama.cpp y calcula tok/s por diferencia entre lecturas de /slots."""
+
+    def __init__(self):
+        self.task_id = None
+        self.task_start = None
+        self.last_t = None
+        self.last_decoded = 0
+        self.last_done = 0
+        self.gen_tok_s = None
+        self.prompt_tok_s = None
+
+    def update(self, slot: dict) -> dict:
+        now = time.time()
+        n_decoded = (slot.get("next_token") or [{}])[0].get("n_decoded", 0) or 0
+        prompt_total = slot.get("n_prompt_tokens") or 0
+        prompt_done = (slot.get("n_prompt_tokens_cache") or 0) + (slot.get("n_prompt_tokens_processed") or 0)
+        prompt_done = min(prompt_done, prompt_total) if prompt_total else prompt_done
+
+        if not slot.get("is_processing"):
+            self.task_id = None
+            return {"activity": "idle", "gen_tokens": None, "prompt_done": None, "prompt_total": None}
+
+        task_id = slot.get("id_task")
+        if task_id != self.task_id:
+            self.task_id = task_id
+            self.task_start = now
+            self.gen_tok_s = None
+            self.prompt_tok_s = None
+        else:
+            dt = now - (self.last_t or now)
+            if dt > 0.5:
+                d_gen = n_decoded - self.last_decoded
+                d_prompt = prompt_done - self.last_done
+                if d_gen > 0:
+                    self.gen_tok_s = round(d_gen / dt, 2)
+                if d_prompt > 0:
+                    self.prompt_tok_s = round(d_prompt / dt, 1)
+        self.last_t = now
+        self.last_decoded = n_decoded
+        self.last_done = prompt_done
+
+        activity = "generating" if n_decoded > 0 else "prompt"
+        progress = round(min(prompt_done / prompt_total, 1.0), 3) if prompt_total else None
+        return {
+            "activity": activity,
+            "prompt_progress": progress if activity == "prompt" else None,
+            "gen_tokens": n_decoded,
+            "prompt_done": prompt_done,
+            "prompt_total": prompt_total,
+            "gen_tok_s": self.gen_tok_s,
+            "prompt_tok_s": self.prompt_tok_s,
+            "task_elapsed_s": round(now - self.task_start, 1),
+        }
+
+
+model_tracker = ModelTracker()
+
+
+def collect_model(gateway: "GatewayTailer", agent: "AgentTailer") -> None:
     status = "down"
     try:
-        with urllib.request.urlopen(LLAMA_HEALTH_URL, timeout=5) as resp:
-            body = resp.read().decode()
-            status = "ok" if '"status":"ok"' in body else "loading"
+        body = http_get(LLAMA_HEALTH_URL)
+        status = "ok" if '"status":"ok"' in body else "loading"
     except Exception:
         status = "down"
 
     tok_s = None
     try:
-        with urllib.request.urlopen(LLAMA_METRICS_URL, timeout=5) as resp:
-            text = resp.read().decode()
-        for line in text.splitlines():
+        for line in http_get(LLAMA_METRICS_URL).splitlines():
             if line.startswith("llamacpp:predicted_tokens_seconds"):
                 tok_s = float(line.rsplit(" ", 1)[1])
     except Exception:
         pass  # /metrics puede no estar habilitado; status ya quedó seteado
 
-    ctx_used = None
-    ctx_total = None
-    activity = None
-    prompt_progress = None
+    row = {
+        "ts": now_iso(),
+        "tok_s": tok_s,
+        "status": status,
+        "last_response_s": gateway.last_response_s,
+        "compress_threshold": agent.compress_threshold,
+        **agent.compression_state(),
+    }
     try:
-        with urllib.request.urlopen(LLAMA_SLOTS_URL, timeout=5) as resp:
-            import json
-
-            slots = json.loads(resp.read().decode())
+        slots = json.loads(http_get(LLAMA_SLOTS_URL))
         if slots:
             slot = slots[0]
-            ctx_used = slot.get("n_prompt_tokens")
-            ctx_total = slot.get("n_ctx")
-            n_decoded = (slot.get("next_token") or [{}])[0].get("n_decoded", 0)
-            if not slot.get("is_processing"):
-                activity = "idle"
-            elif n_decoded > 0:
-                activity = "generating"
-            else:
-                activity = "prompt"
-                total = slot.get("n_prompt_tokens") or 0
-                done = (slot.get("n_prompt_tokens_cache") or 0) + (slot.get("n_prompt_tokens_processed") or 0)
-                if total > 0:
-                    prompt_progress = round(min(done / total, 1.0), 3)
+            row["ctx_used"] = slot.get("n_prompt_tokens")
+            row["ctx_total"] = slot.get("n_ctx")
+            row.update(model_tracker.update(slot))
     except Exception:
         pass  # /slots puede no estar habilitado (--no-slots)
 
-    insert(
-        "model_metrics",
-        {
-            "ts": now_iso(),
-            "tok_s": tok_s,
-            "ctx_used": ctx_used,
-            "ctx_total": ctx_total,
-            "status": status,
-            "activity": activity,
-            "prompt_progress": prompt_progress,
-        },
-    )
+    turn_elapsed = gateway.turn_elapsed()
+    if turn_elapsed is not None and row.get("activity") in ("prompt", "generating"):
+        row["task_elapsed_s"] = turn_elapsed
+
+    insert("model_metrics", row)
     set_service_status("llm (modelo local)", "ok" if status == "ok" else "warn" if status == "loading" else "down")
 
 
@@ -190,8 +246,45 @@ def collect_systemd_services() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Tail de gateway.log -> eventos (sin contenido de mensajes)
+# Tail de logs de Hermes -> eventos y estadísticas (sin contenido de mensajes)
 # ---------------------------------------------------------------------------
+
+class LogTailer:
+    """Sigue un archivo de log con soporte de rotación; `bootstrap` procesa lo ya escrito sin emitir eventos."""
+
+    def __init__(self, path: Path, bootstrap: bool = False):
+        self.path = path
+        self.bootstrap = bootstrap
+        self._fh = None
+        self._inode = None
+
+    def _ensure_open(self):
+        try:
+            stat = self.path.stat()
+        except FileNotFoundError:
+            return
+        if self._fh is None or stat.st_ino != self._inode:
+            first_open = self._fh is None
+            if self._fh:
+                self._fh.close()
+            self._fh = open(self.path, "r", errors="replace")
+            self._inode = stat.st_ino
+            if first_open and self.bootstrap:
+                for line in self._fh:
+                    self.handle_line(line.rstrip("\n"), live=False)
+            elif first_open:
+                self._fh.seek(0, os.SEEK_END)
+
+    def poll(self):
+        self._ensure_open()
+        if self._fh is None:
+            return
+        for line in self._fh:
+            self.handle_line(line.rstrip("\n"), live=True)
+
+    def handle_line(self, line: str, live: bool):
+        raise NotImplementedError
+
 
 INBOUND_RE = re.compile(r"inbound message: platform=(\S+)")
 RESPONSE_RE = re.compile(r"response ready: platform=(\S+).*time=([\d.]+)s")
@@ -201,34 +294,20 @@ COMPACT_START_RE = re.compile(r"Compacting context — summarizing")
 COMPACT_TICK_RE = re.compile(r"Compacting context — still summarizing")
 
 
-class LogTailer:
+class GatewayTailer(LogTailer):
     def __init__(self, path: Path):
-        self.path = path
-        self._fh = None
-        self._inode = None
+        super().__init__(path)
         self.pending_since: dict[str, float] = {}
         self.last_pending_notice = 0.0
+        self.last_response_s: float | None = None
 
-    def _ensure_open(self):
-        try:
-            stat = self.path.stat()
-        except FileNotFoundError:
-            return
-        if self._fh is None or stat.st_ino != self._inode:
-            if self._fh:
-                self._fh.close()
-            self._fh = open(self.path, "r", errors="replace")
-            self._fh.seek(0, os.SEEK_END)
-            self._inode = stat.st_ino
+    def turn_elapsed(self) -> float | None:
+        if not self.pending_since:
+            return None
+        return round(time.time() - min(self.pending_since.values()), 1)
 
     def poll(self):
-        self._ensure_open()
-        if self._fh is None:
-            return
-        for line in self._fh:
-            self._handle_line(line.rstrip("\n"))
-
-        # avisar si hay un turno pendiente hace rato (sin filtrar contenido del mensaje)
+        super().poll()
         now = time.time()
         if self.pending_since and now - self.last_pending_notice > PENDING_NOTICE_EVERY:
             for platform, started in self.pending_since.items():
@@ -242,18 +321,18 @@ class LogTailer:
                 )
             self.last_pending_notice = now
 
-    def _handle_line(self, line: str):
+    def handle_line(self, line: str, live: bool):
         m = INBOUND_RE.search(line)
         if m:
-            platform = m.group(1)
-            self.pending_since[platform] = time.time()
-            emit_event("inbound", f"Mensaje entrante por {platform}")
+            self.pending_since[m.group(1)] = time.time()
+            emit_event("inbound", f"Mensaje entrante por {m.group(1)}")
             return
 
         m = RESPONSE_RE.search(line)
         if m:
             platform, seconds = m.group(1), float(m.group(2))
             self.pending_since.pop(platform, None)
+            self.last_response_s = seconds
             emit_event("response", f"Orión respondió por {platform} en {seconds:.0f}s")
             return
 
@@ -270,23 +349,185 @@ class LogTailer:
 
         if TELEGRAM_TIMEOUT_RE.search(line):
             emit_event("telegram_timeout", "Timeout de Telegram (descarga u otra llamada)", severity="warn")
+
+
+LINE_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
+FALLBACK_RE = re.compile(r"Fallback activated: .+? → (\S+) \((\w+)\)")
+TELEMETRY_RE = re.compile(r"context compression attempt telemetry: (\{.*\})")
+THRESHOLD_RE = re.compile(r"threshold=([\d,]+)")
+COMP_STARTED_RE = re.compile(r"context compression started")
+COMP_USING_RE = re.compile(r"Auxiliary compression: using (\S+) \(([^)]+)\)")
+COMP_DONE_RE = re.compile(r"context compression (done|failed|aborted)")
+COMPRESSION_STALE_S = 20 * 60
+
+
+def _line_time(line: str) -> datetime | None:
+    m = LINE_TS_RE.match(line)
+    if not m:
+        return None
+    return datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").astimezone()
+
+
+class AgentTailer(LogTailer):
+    """Lee agent.log para saber cuándo Orión usa el fallback en la nube y cómo van las compresiones."""
+
+    def __init__(self, path: Path):
+        super().__init__(path, bootstrap=True)
+        self.fallback_times: list[datetime] = []
+        self.last_fallback_model: str | None = None
+        self.compression_times: list[datetime] = []
+        self.last_compression: dict | None = None
+        self.compress_threshold = DEFAULT_COMPRESS_THRESHOLD
+        self.compressing_since: datetime | None = None
+        self.compressing_model: str | None = None
+        self.compressing_provider: str | None = None
+
+    def compression_state(self) -> dict:
+        since = self.compressing_since
+        if since and (datetime.now().astimezone() - since).total_seconds() > COMPRESSION_STALE_S:
+            self.compressing_since = since = None
+        return {
+            "compress_since": since.isoformat() if since else None,
+            "compress_model": self.compressing_model if since else None,
+            "compress_provider": self.compressing_provider if since else None,
+        }
+
+    def _prune(self):
+        cutoff = datetime.now().astimezone() - timedelta(hours=24)
+        self.fallback_times = [t for t in self.fallback_times if t >= cutoff]
+        self.compression_times = [t for t in self.compression_times if t >= cutoff]
+
+    def stats(self) -> dict:
+        self._prune()
+        last_c = self.last_compression or {}
+        return {
+            "fallback_count_24h": len(self.fallback_times),
+            "last_fallback_ts": self.fallback_times[-1].isoformat() if self.fallback_times else None,
+            "last_fallback_model": self.last_fallback_model,
+            "compression_count_24h": len(self.compression_times),
+            "last_compression_ts": last_c.get("ts"),
+            "last_compression_model": last_c.get("model"),
+            "last_compression_provider": last_c.get("provider"),
+            "last_compression_s": last_c.get("seconds"),
+            "last_compression_tokens": last_c.get("tokens"),
+        }
+
+    def handle_line(self, line: str, live: bool):
+        m = THRESHOLD_RE.search(line)
+        if m:
+            self.compress_threshold = int(m.group(1).replace(",", ""))
+
+        if COMP_STARTED_RE.search(line):
+            self.compressing_since = _line_time(line) or datetime.now().astimezone()
+            self.compressing_model = self.compressing_provider = None
             return
+
+        m = COMP_USING_RE.search(line)
+        if m and self.compressing_since:
+            self.compressing_provider, self.compressing_model = m.group(1), m.group(2)
+            return
+
+        if COMP_DONE_RE.search(line):
+            self.compressing_since = None
+            return
+
+        m = FALLBACK_RE.search(line)
+        if m:
+            ts = _line_time(line) or datetime.now().astimezone()
+            self.fallback_times.append(ts)
+            self.last_fallback_model = m.group(1)
+            if live:
+                emit_event("fallback", f"Orión pasó al modelo de respaldo {m.group(1)}", severity="warn")
+            return
+
+        m = TELEMETRY_RE.search(line)
+        if m:
+            try:
+                data = json.loads(m.group(1))
+            except ValueError:
+                return
+            if data.get("commit_status") != "committed" or not data.get("aux_model"):
+                return
+            ts = _line_time(line) or datetime.now().astimezone()
+            ms = data.get("aux_call_duration_ms")
+            seconds = round(ms / 1000, 1) if ms else None
+            self.compression_times.append(ts)
+            self.last_compression = {
+                "ts": ts.isoformat(),
+                "model": data.get("aux_model"),
+                "provider": data.get("aux_provider"),
+                "seconds": seconds,
+                "tokens": data.get("aux_prompt_tokens"),
+            }
+            if live:
+                took = f" en {seconds:.0f}s" if seconds is not None else ""
+                emit_event("compressed", f"Contexto comprimido con {data.get('aux_model')}{took}")
+
+
+# ---------------------------------------------------------------------------
+# Nube: saldo de OpenRouter y modelos configurados en Hermes
+# ---------------------------------------------------------------------------
+
+def _yaml_block(text: str, key: str) -> str:
+    """Devuelve las líneas de un bloque de primer nivel del YAML (sin parser completo)."""
+    m = re.search(rf"^{re.escape(key)}:\s*\n((?:[ \t-].*\n?|\s*\n)*)", text, re.MULTILINE)
+    return m.group(1) if m else ""
+
+
+def read_cloud_config() -> tuple[str | None, str | None]:
+    try:
+        text = HERMES_CONFIG.read_text()
+    except OSError:
+        return None, None
+    models = re.findall(r"model:\s*['\"]?([^\s'\"]+)", _yaml_block(text, "fallback_providers"))
+    chain = " → ".join(models) if models else None
+    aux = _yaml_block(text, "auxiliary")
+    comp = re.search(r"compression:\s*\n(?:\s+.*\n)*?\s+model:\s*['\"]?([^\s'\"]+)", aux)
+    return chain, comp.group(1) if comp else None
+
+
+def collect_cloud(agent: AgentTailer) -> None:
+    chain, compression_model = read_cloud_config()
+    row = {"ts": now_iso(), "fallback_chain": chain, "compression_model": compression_model, **agent.stats()}
+    if OPENROUTER_API_KEY:
+        headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}"}
+        try:
+            key = json.loads(http_get("https://openrouter.ai/api/v1/key", headers, timeout=10)).get("data", {})
+            row["spend_day_usd"] = key.get("usage_daily")
+            row["spend_week_usd"] = key.get("usage_weekly")
+            row["spend_month_usd"] = key.get("usage_monthly")
+            row["key_remaining_usd"] = key.get("limit_remaining")
+        except Exception as exc:
+            print(f"[collector] openrouter key failed: {exc}")
+        try:
+            credits = json.loads(http_get("https://openrouter.ai/api/v1/credits", headers, timeout=10)).get("data", {})
+            if credits.get("total_credits") is not None:
+                row["balance_usd"] = round(credits["total_credits"] - credits.get("total_usage", 0), 4)
+        except Exception as exc:
+            print(f"[collector] openrouter credits failed: {exc}")
+    insert("cloud_metrics", row)
 
 
 def main() -> None:
-    tailer = LogTailer(GATEWAY_LOG)
+    gateway = GatewayTailer(GATEWAY_LOG)
+    agent = AgentTailer(AGENT_LOG)
     last_slow_poll = 0.0
+    last_cloud_poll = 0.0
     print("[collector] starting")
     while True:
         try:
-            tailer.poll()
+            gateway.poll()
+            agent.poll()
             now = time.time()
             if now - last_slow_poll >= POLL_INTERVAL:
                 collect_gpu()
                 collect_system()
-                collect_model()
+                collect_model(gateway, agent)
                 collect_systemd_services()
                 last_slow_poll = now
+            if now - last_cloud_poll >= CLOUD_POLL_INTERVAL:
+                collect_cloud(agent)
+                last_cloud_poll = now
         except Exception as exc:
             print(f"[collector] loop error: {exc}")
         time.sleep(2)
