@@ -817,6 +817,77 @@ export default function Home() {
               )}
             </section>
 
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Section title="OpenRouter" stale={!loading && isStale(cloud?.ts, 180)}>
+                {loading ? (
+                  <Skeleton />
+                ) : (
+                  <div className="space-y-2">
+                    <div className="flex items-baseline justify-between gap-3">
+                      <span className="text-sm text-niebla">Saldo</span>
+                      <span className={`num font-display text-3xl font-semibold ${lowBalance ? "text-aviso" : "text-oro"}`}>
+                        {fmtUsd(cloud?.balance_usd)}
+                      </span>
+                    </div>
+                    <dl className="num grid grid-cols-3 gap-2 border-t border-linea/70 pt-2 text-center">
+                      {[
+                        ["Hoy", cloud?.spend_day_usd],
+                        ["Semana", cloud?.spend_week_usd],
+                        ["Mes", cloud?.spend_month_usd],
+                      ].map(([label, value]) => (
+                        <div key={label as string}>
+                          <dt className="text-xs text-niebla">{label as string}</dt>
+                          <dd className="text-[15px] text-luz">{fmtUsd(value as number | null | undefined)}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                    <p className="num text-xs text-niebla">
+                      Compresiones hoy: {cloud?.compression_count_24h ?? 0} · respaldo usado: {cloud?.fallback_count_24h ?? 0}
+                    </p>
+                    {lowBalance && <p className="text-xs text-aviso">Saldo bajo: conviene recargar.</p>}
+                  </div>
+                )}
+              </Section>
+
+              <Section title="Recursos del PC" stale={!loading && (isStale(gpu?.ts) || isStale(system?.ts))}>
+                {loading ? (
+                  <Skeleton />
+                ) : (
+                  <div className="space-y-2.5">
+                    <div>
+                      <div className="flex items-baseline justify-between gap-3">
+                        <span className="text-sm text-niebla">GPU</span>
+                        <span className="num text-[15px]">
+                          <span className="font-display text-lg font-semibold">{gpu?.util_pct != null ? `${Math.round(gpu.util_pct)} %` : "—"}</span>
+                          <span className={gpuHot ? "text-falla" : "text-niebla"}>{gpu?.temp_c != null ? ` · ${Math.round(gpu.temp_c)} °C` : ""}</span>
+                        </span>
+                      </div>
+                      <Sparkline values={gpuHist} max={100} tone="#a78bfa" />
+                      <p className="num text-xs text-niebla">
+                        Video{" "}
+                        <span className={vramTight ? "text-aviso" : "text-luz"}>
+                          {gb(gpu?.vram_used_mb)} de {gb(gpu?.vram_total_mb)} GB
+                        </span>
+                        {vramTight && <span className="text-aviso"> · casi llena</span>}
+                      </p>
+                    </div>
+                    <div>
+                      <div className="flex items-baseline justify-between gap-3">
+                        <span className="text-sm text-niebla">CPU</span>
+                        <span className={`num font-display text-lg font-semibold ${cpuHigh ? "text-aviso" : ""}`}>
+                          {system?.cpu_pct != null ? `${Math.round(system.cpu_pct)} %` : "—"}
+                        </span>
+                      </div>
+                      <Sparkline values={cpuHist} max={100} tone="#6ee7b7" />
+                      <p className="num text-xs text-niebla">
+                        RAM {gb(system?.ram_used_mb)} de {gb(system?.ram_total_mb)} GB
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </Section>
+            </div>
+
             <Section title="Últimos turnos">
               {turns.length === 0 ? (
                 <p className="text-sm text-niebla">Sin turnos todavía.</p>
@@ -876,65 +947,6 @@ export default function Home() {
                   ))}
                 </ul>
               </Fold>
-            </Section>
-
-            <Section title="Recursos del PC" stale={!loading && (isStale(gpu?.ts) || isStale(system?.ts))}>
-              {loading ? (
-                <Skeleton />
-              ) : (
-                <div className="space-y-4">
-                  <div>
-                    <div className="flex items-baseline justify-between gap-3">
-                      <span className="text-sm text-niebla">GPU</span>
-                      <span className="num font-display text-2xl font-semibold">{gpu?.util_pct != null ? `${Math.round(gpu.util_pct)} %` : "—"}</span>
-                    </div>
-                    <Sparkline values={gpuHist} max={100} tone="#a78bfa" />
-                    <p className="num mt-1 text-sm text-niebla">
-                      Memoria de video{" "}
-                      <span className={vramTight ? "text-aviso" : "text-luz"}>
-                        {gb(gpu?.vram_used_mb)} de {gb(gpu?.vram_total_mb)} GB
-                      </span>
-                      {" · "}
-                      <span className={gpuHot ? "text-falla" : "text-luz"}>{gpu?.temp_c != null ? `${Math.round(gpu.temp_c)} °C` : "—"}</span>
-                      {" · "}
-                      {gpu?.power_w != null ? `${Math.round(gpu.power_w)} W` : "—"}
-                    </p>
-                    {vramTight && <p className="mt-0.5 text-xs text-aviso">Memoria de video casi llena: la pantalla puede fallar.</p>}
-                  </div>
-                  <div>
-                    <div className="flex items-baseline justify-between gap-3">
-                      <span className="text-sm text-niebla">Procesador</span>
-                      <span className={`num font-display text-2xl font-semibold ${cpuHigh ? "text-aviso" : ""}`}>
-                        {system?.cpu_pct != null ? `${Math.round(system.cpu_pct)} %` : "—"}
-                      </span>
-                    </div>
-                    <Sparkline values={cpuHist} max={100} tone="#6ee7b7" />
-                    <p className="num mt-1 text-sm text-niebla">
-                      RAM {gb(system?.ram_used_mb)} de {gb(system?.ram_total_mb)} GB
-                    </p>
-                  </div>
-                  <p className="text-xs text-niebla">Gráficos de los últimos ~7 minutos.</p>
-                </div>
-              )}
-            </Section>
-
-            <Section title="Nube" stale={!loading && isStale(cloud?.ts, 180)}>
-              {loading ? (
-                <Skeleton />
-              ) : (
-                <>
-                  <div className="flex items-baseline justify-between gap-3">
-                    <span className={`num font-display text-2xl font-semibold ${lowBalance ? "text-aviso" : ""}`}>
-                      {fmtUsd(cloud?.balance_usd)}
-                    </span>
-                    <span className="text-sm text-niebla">saldo en OpenRouter</span>
-                  </div>
-                  <p className="num text-sm text-niebla">
-                    Gastado: hoy {fmtUsd(cloud?.spend_day_usd)}, semana {fmtUsd(cloud?.spend_week_usd)}, mes {fmtUsd(cloud?.spend_month_usd)}.
-                  </p>
-                  {lowBalance && <p className="mt-1 text-xs text-aviso">Saldo bajo: conviene recargar.</p>}
-                </>
-              )}
             </Section>
 
             <Section title="Registro técnico">
