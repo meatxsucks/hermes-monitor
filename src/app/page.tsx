@@ -40,31 +40,10 @@ type ModelRow = {
   compress_provider: string | null;
 };
 
-type CloudRow = {
-  ts: string;
-  balance_usd: number | null;
-  spend_day_usd: number | null;
-  spend_week_usd: number | null;
-  spend_month_usd: number | null;
-  key_remaining_usd: number | null;
-  fallback_chain: string | null;
-  fallback_count_24h: number | null;
-  last_fallback_ts: string | null;
-  last_fallback_model: string | null;
-  compression_model: string | null;
-  compression_count_24h: number | null;
-  last_compression_ts: string | null;
-  last_compression_model: string | null;
-  last_compression_provider: string | null;
-  last_compression_s: number | null;
-  last_compression_tokens: number | null;
-};
-
 type ServiceRow = {
   ts: string;
   service: string;
   status: string;
-  detail: string | null;
 };
 
 type EventRow = {
@@ -74,25 +53,49 @@ type EventRow = {
   severity: string;
 };
 
+type CloudRow = {
+  ts: string;
+  balance_usd: number | null;
+  spend_day_usd: number | null;
+  spend_week_usd: number | null;
+  spend_month_usd: number | null;
+  fallback_chain: string | null;
+  fallback_count_24h: number | null;
+  last_fallback_ts: string | null;
+  last_fallback_model: string | null;
+  compression_model: string | null;
+  compression_count_24h: number | null;
+  last_compression_ts: string | null;
+  last_compression_model: string | null;
+  last_compression_s: number | null;
+  last_compression_tokens: number | null;
+};
+
+type TurnRow = {
+  turn_key: string;
+  platform: string;
+  started_at: string;
+  ended_at: string | null;
+  status: string;
+  phase: string | null;
+  total_s: number | null;
+  read_s: number;
+  write_s: number;
+  tools_s: number;
+  compress_s: number;
+  api_calls: number;
+  tokens_out: number;
+  tools: Record<string, number>;
+  tool_errors: number;
+  compressed: boolean;
+  fallback_used: boolean;
+};
+
 const POLL_MS = 2000;
+const HISTORY_MS = 10000;
 const PULL_THRESHOLD = 70;
 const PULL_MAX = 110;
-
-function timeAgo(ts: string | number | undefined) {
-  if (!ts) return "sin datos";
-  const diff = Date.now() - new Date(ts).getTime();
-  const s = Math.max(0, Math.floor(diff / 1000));
-  if (s < 60) return `hace ${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `hace ${m}m`;
-  const h = Math.floor(m / 60);
-  return `hace ${h}h`;
-}
-
-function isStale(ts: string | undefined, maxSeconds = 120) {
-  if (!ts) return true;
-  return Date.now() - new Date(ts).getTime() > maxSeconds * 1000;
-}
+const STALE_S = 120;
 
 const nf = new Intl.NumberFormat("es-CL");
 
@@ -100,13 +103,26 @@ function fmtInt(n: number | null | undefined) {
   return n == null ? "—" : nf.format(Math.round(n));
 }
 
+function fmtDec(n: number | null | undefined, digits = 1) {
+  return n == null ? "—" : n.toLocaleString("es-CL", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
 function fmtDuration(seconds: number | null | undefined) {
   if (seconds == null) return "—";
   const s = Math.max(0, Math.round(seconds));
-  if (s < 60) return `${s} s`;
+  if (s < 60) return `${s}\u00A0s`;
   const m = Math.floor(s / 60);
   const r = s % 60;
-  return r ? `${m} min ${r} s` : `${m} min`;
+  return r ? `${m}\u00A0min\u00A0${r}\u00A0s` : `${m}\u00A0min`;
+}
+
+function fmtShort(seconds: number | null | undefined) {
+  if (seconds == null) return "—";
+  const s = Math.max(0, Math.round(seconds));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return r ? `${m}m ${r}s` : `${m}m`;
 }
 
 function fmtUsd(n: number | null | undefined) {
@@ -115,9 +131,223 @@ function fmtUsd(n: number | null | undefined) {
   return `US$${n.toLocaleString("es-CL", { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
 }
 
+function fmtClock(ts: string) {
+  return new Date(ts).toLocaleTimeString("es-CL", { hour: "2-digit", minute: "2-digit", hour12: false });
+}
+
+function timeAgo(ts: string | number | undefined | null) {
+  if (!ts) return "sin datos";
+  const s = Math.max(0, Math.floor((Date.now() - new Date(ts).getTime()) / 1000));
+  if (s < 60) return `hace ${s} s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `hace ${m} min`;
+  const h = Math.floor(m / 60);
+  return `hace ${h} h`;
+}
+
+function isStale(ts: string | undefined, maxSeconds = STALE_S) {
+  if (!ts) return true;
+  return Date.now() - new Date(ts).getTime() > maxSeconds * 1000;
+}
+
 function shortModel(id: string | null | undefined) {
   if (!id) return "—";
+  if (id === "openrouter/free") return id;
   return id.split("/").pop() ?? id;
+}
+
+function platformName(p: string) {
+  if (p.startsWith("whatsapp")) return "WhatsApp";
+  if (p.startsWith("telegram")) return "Telegram";
+  return p;
+}
+
+function Spinner({ className = "h-4 w-4", style }: { className?: string; style?: React.CSSProperties }) {
+  return (
+    <svg className={className} style={style} viewBox="0 0 24 24" fill="none" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.2" strokeWidth="3" />
+      <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function Chevron({ open }: { open: boolean }) {
+  return (
+    <svg
+      className={`h-4 w-4 shrink-0 text-niebla transition-transform motion-reduce:transition-none ${open ? "rotate-180" : ""}`}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="m6 9 6 6 6-6" />
+    </svg>
+  );
+}
+
+/** Bloque plegable: el encabezado siempre se ve; el detalle se abre al tocar (o solo si `forceOpen`). */
+function Fold({
+  summary,
+  children,
+  forceOpen = false,
+}: {
+  summary: React.ReactNode;
+  children: React.ReactNode;
+  forceOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (forceOpen) setOpen(true);
+  }, [forceOpen]);
+  return (
+    <div>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center justify-between gap-3 py-3 text-left"
+      >
+        <span className="min-w-0 flex-1">{summary}</span>
+        <Chevron open={open} />
+      </button>
+      <div
+        className={`grid transition-[grid-template-rows] duration-300 motion-reduce:transition-none ${
+          open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"
+        }`}
+      >
+        <div className="overflow-hidden">
+          <div className="pb-3">{children}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Sparkline({ values, max, tone }: { values: number[]; max: number; tone: string }) {
+  if (values.length < 2) return <div className="h-7 w-full" />;
+  const w = 100;
+  const h = 28;
+  const step = w / (values.length - 1);
+  const pts = values.map((v, i) => `${(i * step).toFixed(2)},${(h - 2 - (Math.min(v, max) / max) * (h - 4)).toFixed(2)}`);
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" className="h-7 w-full" aria-hidden="true">
+      <polyline points={`0,${h} ${pts.join(" ")} ${w},${h}`} fill={tone} fillOpacity="0.14" stroke="none" />
+      <polyline
+        points={pts.join(" ")}
+        fill="none"
+        stroke={tone}
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+        strokeLinecap="round"
+        vectorEffect="non-scaling-stroke"
+      />
+    </svg>
+  );
+}
+
+type NodeState = "done" | "active" | "pending";
+type ConstellationNode = { key: string; label: string; detail: string; state: NodeState };
+
+const PHASE_ORDER = ["msg", "read", "tools", "compress", "write", "sent"] as const;
+
+function buildConstellation(turn: TurnRow): ConstellationNode[] {
+  const active = turn.status === "active";
+  const interrupted = turn.status === "interrupted";
+  const usedTools = turn.tools_s > 0 || Object.keys(turn.tools).length > 0;
+  const currentIdx = active ? PHASE_ORDER.indexOf((turn.phase as (typeof PHASE_ORDER)[number]) ?? "read") : PHASE_ORDER.length;
+
+  const defs: { key: (typeof PHASE_ORDER)[number]; label: string; detail: string; include: boolean }[] = [
+    { key: "msg", label: "Mensaje", detail: platformName(turn.platform), include: true },
+    { key: "read", label: "Lee", detail: fmtShort(turn.read_s), include: true },
+    {
+      key: "tools",
+      label: "Acciones",
+      detail: fmtShort(turn.tools_s),
+      include: usedTools || turn.phase === "tools",
+    },
+    {
+      key: "compress",
+      label: "Comprime",
+      detail: fmtShort(turn.compress_s),
+      include: turn.compressed || turn.phase === "compress",
+    },
+    { key: "write", label: "Escribe", detail: fmtShort(turn.write_s), include: true },
+    {
+      key: "sent",
+      label: interrupted ? "Cortado" : "Enviado",
+      detail: active ? "…" : fmtShort(turn.total_s),
+      include: true,
+    },
+  ];
+
+  return defs
+    .filter((d) => d.include)
+    .map((d) => {
+      const idx = PHASE_ORDER.indexOf(d.key);
+      const state: NodeState = !active ? "done" : idx < currentIdx ? "done" : idx === currentIdx ? "active" : "pending";
+      return { key: d.key, label: d.label, detail: d.detail, state };
+    });
+}
+
+function Constellation({ turn }: { turn: TurnRow }) {
+  const nodes = buildConstellation(turn);
+  const width = 320;
+  const padX = 26;
+  const step = nodes.length > 1 ? (width - padX * 2) / (nodes.length - 1) : 0;
+  const ys = nodes.map((_, i) => (i % 2 === 0 ? 24 : 40));
+  const xs = nodes.map((_, i) => padX + i * step);
+  const reached = nodes.filter((n) => n.state !== "pending").length;
+  return (
+    <div className="mt-5">
+      <svg viewBox={`0 0 ${width} 62`} className="w-full" role="img" aria-label="Fases del turno de Orión">
+        {nodes.slice(0, -1).map((_, i) => (
+          <line
+            key={i}
+            x1={xs[i]}
+            y1={ys[i]}
+            x2={xs[i + 1]}
+            y2={ys[i + 1]}
+            stroke={i + 1 < reached ? "#a78bfa" : "#2a3670"}
+            strokeWidth="1.6"
+            strokeDasharray={i + 1 < reached ? undefined : "3 4"}
+            strokeLinecap="round"
+          />
+        ))}
+        {nodes.map((n, i) => {
+          const interruptedEnd = turn.status === "interrupted" && i === nodes.length - 1;
+          const fill = interruptedEnd ? "#f87171" : n.state === "done" ? "#a78bfa" : n.state === "active" ? "#fde68a" : "#0f1631";
+          const stroke = n.state === "pending" ? "#2a3670" : interruptedEnd ? "#f87171" : n.state === "active" ? "#fde68a" : "#a78bfa";
+          return (
+            <g key={n.key}>
+              {n.state === "active" && <circle cx={xs[i]} cy={ys[i]} r="13" fill="#fde68a" fillOpacity="0.12" />}
+              <circle
+                cx={xs[i]}
+                cy={ys[i]}
+                r={n.state === "active" ? 7 : 5}
+                fill={fill}
+                stroke={stroke}
+                strokeWidth="1.6"
+                className={n.state === "active" ? "estrella-activa" : undefined}
+              />
+            </g>
+          );
+        })}
+      </svg>
+      <ol className="mt-1 grid" style={{ gridTemplateColumns: `repeat(${nodes.length}, minmax(0, 1fr))` }}>
+        {nodes.map((n) => (
+          <li key={n.key} className="px-0.5 text-center">
+            <p className={`text-[11px] leading-tight ${n.state === "active" ? "font-semibold text-oro" : n.state === "done" ? "text-luz" : "text-niebla"}`}>
+              {n.label}
+            </p>
+            <p className="num text-[11px] leading-tight text-niebla">{n.detail}</p>
+          </li>
+        ))}
+      </ol>
+    </div>
+  );
 }
 
 type ModelView = {
@@ -134,7 +364,7 @@ function describeModel(model: ModelRow | undefined): ModelView {
     return { busy: false, tone: "down", title: "Apagado", detail: "Modo noche o servicio detenido" };
   }
   if (model.status === "loading") {
-    return { busy: true, tone: "warn", title: "Arrancando el modelo…", detail: "Cargando la IA en la GPU (~20 s)" };
+    return { busy: true, tone: "warn", title: "Arrancando el modelo", detail: "Cargando la IA en la GPU (~20 s)" };
   }
   if (model.compress_since) {
     const where =
@@ -146,7 +376,7 @@ function describeModel(model: ModelRow | undefined): ModelView {
       busy: true,
       tone: "busy",
       title: "Comprimiendo la conversación",
-      detail: `Resumiendo lo antiguo ${where} · lleva ${fmtDuration(elapsed)}`,
+      detail: `Resume lo antiguo ${where}. Lleva ${fmtDuration(elapsed)}.`,
     };
   }
   if (model.activity === "prompt") {
@@ -155,10 +385,9 @@ function describeModel(model: ModelRow | undefined): ModelView {
     if (model.prompt_tok_s) {
       parts.push(`${fmtInt(model.prompt_tok_s)} tok/s`);
       if (model.prompt_total != null && model.prompt_done != null) {
-        parts.push(`~${fmtDuration((model.prompt_total - model.prompt_done) / model.prompt_tok_s)} restante`);
+        parts.push(`faltan ~${fmtDuration((model.prompt_total - model.prompt_done) / model.prompt_tok_s)}`);
       }
     }
-    if (model.task_elapsed_s != null) parts.push(`turno lleva ${fmtDuration(model.task_elapsed_s)}`);
     return {
       busy: true,
       tone: "busy",
@@ -170,8 +399,7 @@ function describeModel(model: ModelRow | undefined): ModelView {
   if (model.activity === "generating") {
     const speed = model.gen_tok_s ?? model.tok_s;
     const parts = [`${fmtInt(model.gen_tokens)} tokens escritos`];
-    if (speed) parts.push(`${speed.toLocaleString("es-CL", { maximumFractionDigits: 1 })} tok/s`);
-    if (model.task_elapsed_s != null) parts.push(`turno lleva ${fmtDuration(model.task_elapsed_s)}`);
+    if (speed) parts.push(`${fmtDec(speed)} tok/s`);
     return { busy: true, tone: "busy", title: "Escribiendo respuesta", detail: parts.join(" · ") };
   }
   return {
@@ -180,144 +408,135 @@ function describeModel(model: ModelRow | undefined): ModelView {
     title: "Libre",
     detail:
       model.last_response_s != null
-        ? `Esperando tu mensaje · la última respuesta tardó ${fmtDuration(model.last_response_s)}`
-        : "Esperando tu mensaje",
+        ? `Esperando tu mensaje. La última respuesta tardó ${fmtDuration(model.last_response_s)}.`
+        : "Esperando tu mensaje.",
   };
 }
 
 function ContextBar({ model }: { model: ModelRow | undefined }) {
-  const used = model?.ctx_used;
   const total = model?.ctx_total;
+  const used = model?.ctx_used ?? (total ? 0 : null);
   if (used == null || !total) {
-    return <p className="mt-3 text-sm text-zinc-500">Contexto: sin datos</p>;
+    return <p className="mt-5 text-sm text-niebla">Contexto: sin datos</p>;
   }
   const threshold = model?.compress_threshold ?? null;
   const pct = Math.min(100, (used / total) * 100);
   const thPct = threshold ? Math.min(100, (threshold / total) * 100) : null;
   const left = threshold != null ? threshold - used : null;
-  const barColor = left != null && left <= 0 ? "bg-amber-400" : pct > 70 ? "bg-violet-400" : "bg-emerald-400";
+  const barColor = left != null && left <= 0 ? "bg-aviso" : pct > 70 ? "bg-astro" : "bg-ok";
   return (
-    <div className="mt-3">
-      <div className="flex items-baseline justify-between text-sm">
-        <span className="text-zinc-400">Contexto</span>
-        <span className="text-zinc-300">
-          {fmtInt(used)} / {fmtInt(total)} tokens <span className="text-zinc-500">({Math.round(pct)} %)</span>
+    <div className="mt-5">
+      <div className="flex items-baseline justify-between gap-2 text-sm">
+        <span className="text-niebla">Memoria</span>
+        <span className="num whitespace-nowrap text-luz">
+          {fmtInt(used)} / {fmtInt(total)} <span className="text-niebla">({Math.round(pct)}&nbsp;%)</span>
         </span>
       </div>
-      <div className="relative mt-1 h-2 w-full overflow-hidden rounded-full bg-zinc-800">
-        <div className={`h-full rounded-full ${barColor} transition-all duration-700`} style={{ width: `${pct}%` }} />
-        {thPct != null && <div className="absolute inset-y-0 w-0.5 bg-amber-300" style={{ left: `${thPct}%` }} />}
+      <div className="relative mt-2 h-2 w-full overflow-hidden rounded-full bg-cielo">
+        <div className={`h-full rounded-full ${barColor} transition-all duration-700 motion-reduce:transition-none`} style={{ width: `${pct}%` }} />
+        {thPct != null && <div className="absolute inset-y-0 w-0.5 bg-oro" style={{ left: `${thPct}%` }} />}
       </div>
       {left != null && (
-        <p className="mt-1 text-xs text-zinc-500">
+        <p className="mt-1.5 text-xs text-niebla">
           {left > 0
-            ? `Se comprime a los ${fmtInt(threshold)} tokens (faltan ${fmtInt(left)})`
-            : `Pasó el umbral de ${fmtInt(threshold)}: se va a comprimir en el próximo paso`}
+            ? `Se comprime al llegar a ${fmtInt(threshold)} (faltan ${fmtInt(left)}).`
+            : "Pasó el umbral: se comprime antes de la próxima respuesta."}
         </p>
       )}
     </div>
   );
 }
 
-/** Devuelve true durante un instante cada vez que cambia `key`. */
-function useFlash(key: string | undefined, ms = 700) {
-  const [flash, setFlash] = useState(false);
-  const prev = useRef(key);
-  useEffect(() => {
-    if (key && prev.current && key !== prev.current) {
-      setFlash(true);
-      const t = setTimeout(() => setFlash(false), ms);
-      prev.current = key;
-      return () => clearTimeout(t);
-    }
-    prev.current = key;
-  }, [key, ms]);
-  return flash;
-}
-
-function Spinner({ className = "h-4 w-4", style }: { className?: string; style?: React.CSSProperties }) {
+function LiveIndicator({ lastOkAt, failing, fetching }: { lastOkAt: number | undefined; failing: boolean; fetching: boolean }) {
+  const late = lastOkAt == null || Date.now() - lastOkAt > POLL_MS * 5;
+  const bad = failing || late;
   return (
-    <svg className={className} style={style} viewBox="0 0 24 24" fill="none" aria-hidden="true">
-      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.2" strokeWidth="3" />
-      <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function Card({
-  title,
-  stale,
-  loading,
-  flashKey,
-  children,
-}: {
-  title: string;
-  stale?: boolean;
-  loading?: boolean;
-  flashKey?: string;
-  children: React.ReactNode;
-}) {
-  const flash = useFlash(flashKey);
-  return (
-    <div
-      className={`rounded-xl border bg-zinc-900 p-4 shadow-sm transition-colors duration-700 ${
-        flash ? "border-sky-500/60 bg-zinc-800/80" : "border-zinc-800"
-      }`}
-    >
-      <div className="mb-2 flex items-center justify-between">
-        <h2 className="text-sm font-medium text-zinc-400">{title}</h2>
-        {loading ? (
-          <span className="h-2 w-2 animate-pulse rounded-full bg-sky-400" />
-        ) : (
-          stale && (
-            <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-xs text-amber-400">
-              sin datos recientes
-            </span>
-          )
-        )}
-      </div>
-      {loading ? (
-        <div className="animate-pulse space-y-2">
-          <div className="h-6 w-24 rounded bg-zinc-800" />
-          <div className="h-3 w-32 rounded bg-zinc-800" />
-          <div className="h-3 w-20 rounded bg-zinc-800" />
-        </div>
+    <div className="flex items-center gap-2 text-xs text-niebla">
+      {fetching ? (
+        <Spinner className="h-3 w-3 motion-safe:animate-spin text-astro" />
       ) : (
-        children
+        <span className="relative flex h-2.5 w-2.5">
+          <span
+            className={`absolute inline-flex h-full w-full rounded-full opacity-60 motion-safe:animate-ping ${bad ? "bg-aviso" : "bg-ok"}`}
+          />
+          <span className={`relative inline-flex h-2.5 w-2.5 rounded-full ${bad ? "bg-aviso" : "bg-ok"}`} />
+        </span>
       )}
+      <span className={bad ? "text-aviso" : "text-ok"}>{bad ? "Reconectando" : "En vivo"}</span>
+      <span className="num">{lastOkAt ? timeAgo(lastOkAt) : "conectando…"}</span>
     </div>
   );
 }
 
-function LiveIndicator({
-  lastOkAt,
-  failing,
-  fetching,
-}: {
-  lastOkAt: number | undefined;
-  failing: boolean;
-  fetching: boolean;
-}) {
-  const late = lastOkAt == null || Date.now() - lastOkAt > POLL_MS * 5;
-  const bad = failing || late;
+function Section({ title, stale, children }: { title: string; stale?: boolean; children: React.ReactNode }) {
   return (
-    <div className="flex items-center gap-2 text-xs text-zinc-400">
-      {fetching ? (
-        <Spinner className="h-3 w-3 animate-spin text-sky-400" />
-      ) : (
-        <span className="relative flex h-2.5 w-2.5">
-          <span
-            className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-60 ${
-              bad ? "bg-amber-400" : "bg-emerald-400"
-            }`}
-          />
-          <span
-            className={`relative inline-flex h-2.5 w-2.5 rounded-full ${bad ? "bg-amber-400" : "bg-emerald-400"}`}
-          />
-        </span>
+    <section className="rounded-2xl bg-sup/60 px-4 py-4 ring-1 ring-linea/70">
+      <div className="mb-2 flex items-center justify-between">
+        <h2 className="font-display text-base font-semibold text-luz">{title}</h2>
+        {stale && <span className="rounded-full bg-aviso/15 px-2 py-0.5 text-xs text-aviso">sin datos recientes</span>}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function Skeleton() {
+  return (
+    <div className="motion-safe:animate-pulse space-y-3" aria-hidden="true">
+      <div className="h-7 w-44 rounded bg-sup" />
+      <div className="h-4 w-64 max-w-full rounded bg-sup" />
+      <div className="h-16 w-full rounded bg-sup" />
+    </div>
+  );
+}
+
+function turnCause(t: TurnRow): string | null {
+  if ((t.total_s ?? 0) < 60) return null;
+  const parts: [string, number][] = [
+    ["compresión", t.compress_s],
+    ["lectura", t.read_s],
+    ["herramientas", t.tools_s],
+    ["escritura", t.write_s],
+  ];
+  const [name, secs] = parts.reduce((a, b) => (b[1] > a[1] ? b : a));
+  if (secs < 20) return null;
+  return `${name} ${fmtDuration(secs)}`;
+}
+
+function PhaseBars({ t }: { t: TurnRow }) {
+  const total = Math.max(t.total_s ?? 0, t.read_s + t.tools_s + t.compress_s + t.write_s, 1);
+  const rows: [string, number, string][] = [
+    ["Lectura", t.read_s, "bg-astro"],
+    ["Herramientas", t.tools_s, "bg-oro"],
+    ["Compresión", t.compress_s, "bg-aviso"],
+    ["Escritura", t.write_s, "bg-ok"],
+  ];
+  const toolList = Object.entries(t.tools).sort((a, b) => b[1] - a[1]);
+  return (
+    <div className="space-y-2 text-sm">
+      {rows
+        .filter(([, v]) => v > 0)
+        .map(([label, v, color]) => (
+          <div key={label}>
+            <div className="flex justify-between text-niebla">
+              <span>{label}</span>
+              <span className="num text-luz">{fmtDuration(v)}</span>
+            </div>
+            <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-cielo">
+              <div className={`h-full rounded-full ${color}`} style={{ width: `${Math.max(3, (v / total) * 100)}%` }} />
+            </div>
+          </div>
+        ))}
+      <p className="num pt-1 text-xs text-niebla">
+        {t.api_calls} {t.api_calls === 1 ? "llamada" : "llamadas"} al modelo · {fmtInt(t.tokens_out)} tokens escritos
+        {t.fallback_used && " · usó el modelo de respaldo"}
+      </p>
+      {toolList.length > 0 && (
+        <p className="text-xs text-niebla">
+          Herramientas: {toolList.map(([n, c]) => `${n}${c > 1 ? ` ×${c}` : ""}`).join(", ")}
+          {t.tool_errors > 0 && <span className="text-aviso"> · {t.tool_errors} con error</span>}
+        </p>
       )}
-      <span className={bad ? "text-amber-400" : "text-emerald-400"}>{bad ? "Reconectando" : "En vivo"}</span>
-      <span className="text-zinc-500">· {lastOkAt ? timeAgo(lastOkAt) : "conectando…"}</span>
     </div>
   );
 }
@@ -329,6 +548,9 @@ export default function Home() {
   const [services, setServices] = useState<ServiceRow[]>([]);
   const [events, setEvents] = useState<EventRow[]>([]);
   const [cloud, setCloud] = useState<CloudRow>();
+  const [turns, setTurns] = useState<TurnRow[]>([]);
+  const [gpuHist, setGpuHist] = useState<number[]>([]);
+  const [cpuHist, setCpuHist] = useState<number[]>([]);
   const [, setTick] = useState(0);
   const [loading, setLoading] = useState(true);
   const [fetching, setFetching] = useState(false);
@@ -343,15 +565,16 @@ export default function Home() {
     inFlight.current = true;
     setFetching(true);
     try {
-      const [gpuRes, sysRes, modelRes, svcRes, evtRes, cloudRes] = await Promise.all([
+      const [gpuRes, sysRes, modelRes, svcRes, evtRes, cloudRes, turnRes] = await Promise.all([
         supabase.from("gpu_metrics").select("*").order("ts", { ascending: false }).limit(1),
         supabase.from("system_metrics").select("*").order("ts", { ascending: false }).limit(1),
         supabase.from("model_metrics").select("*").order("ts", { ascending: false }).limit(1),
         supabase.from("service_status").select("*").order("ts", { ascending: false }).limit(10),
-        supabase.from("events").select("*").order("ts", { ascending: false }).limit(20),
+        supabase.from("events").select("*").order("ts", { ascending: false }).limit(30),
         supabase.from("cloud_metrics").select("*").order("ts", { ascending: false }).limit(1),
+        supabase.from("turns").select("*").order("started_at", { ascending: false }).limit(12),
       ]);
-      const error = gpuRes.error || sysRes.error || modelRes.error || svcRes.error || evtRes.error || cloudRes.error;
+      const error = [gpuRes, sysRes, modelRes, svcRes, evtRes, cloudRes, turnRes].find((r) => r.error)?.error;
       if (error) throw error;
 
       setGpu(gpuRes.data?.[0]);
@@ -364,6 +587,7 @@ export default function Home() {
       setServices(Array.from(latestByService.values()));
       setEvents((evtRes.data ?? []) as EventRow[]);
       setCloud(cloudRes.data?.[0]);
+      setTurns((turnRes.data ?? []) as TurnRow[]);
       setFailing(false);
       setLastOkAt(Date.now());
       setLoading(false);
@@ -372,6 +596,19 @@ export default function Home() {
     } finally {
       inFlight.current = false;
       setFetching(false);
+    }
+  }, []);
+
+  const loadHistory = useCallback(async () => {
+    try {
+      const [g, s] = await Promise.all([
+        supabase.from("gpu_metrics").select("ts,util_pct").order("ts", { ascending: false }).limit(150),
+        supabase.from("system_metrics").select("ts,cpu_pct").order("ts", { ascending: false }).limit(150),
+      ]);
+      if (g.data) setGpuHist(g.data.map((r) => r.util_pct ?? 0).reverse());
+      if (s.data) setCpuHist(s.data.map((r) => r.cpu_pct ?? 0).reverse());
+    } catch {
+      /* el historial es opcional; el resto del panel sigue funcionando */
     }
   }, []);
 
@@ -385,6 +622,12 @@ export default function Home() {
     const interval = setInterval(load, POLL_MS);
     return () => clearInterval(interval);
   }, [load]);
+
+  useEffect(() => {
+    loadHistory();
+    const interval = setInterval(loadHistory, HISTORY_MS);
+    return () => clearInterval(interval);
+  }, [loadHistory]);
 
   useEffect(() => {
     let startY: number | null = null;
@@ -413,7 +656,7 @@ export default function Home() {
         setPull(PULL_THRESHOLD);
         if ("vibrate" in navigator) navigator.vibrate?.(10);
         const minDelay = new Promise((r) => setTimeout(r, 700));
-        await Promise.all([load(), minDelay]);
+        await Promise.all([load(), loadHistory(), minDelay]);
         setRefreshing(false);
       }
       current = 0;
@@ -430,13 +673,34 @@ export default function Home() {
       window.removeEventListener("touchend", onEnd);
       window.removeEventListener("touchcancel", onEnd);
     };
-  }, [load, refreshing]);
+  }, [load, loadHistory, refreshing]);
 
   const modelView = describeModel(model);
   const pullReady = pull >= PULL_THRESHOLD;
+  const heroTurn = turns.find((t) => t.status === "active") ?? turns[0];
+  const heroIsLive = heroTurn?.status === "active";
+
+  const llmStatuses = services.filter((s) => s.service.startsWith("llm")).map((s) => s.status);
+  const gateway = services.find((s) => s.service.startsWith("hermes-gateway"));
+  const worst = (list: string[]) => (list.includes("down") ? "down" : list.includes("warn") ? "warn" : list.length ? "ok" : "none");
+  const healthItems: { name: string; status: string }[] = [
+    { name: "Modelo local", status: worst(llmStatuses) },
+    { name: "Conexión de Orión (WhatsApp y Telegram)", status: gateway?.status ?? "none" },
+  ];
+  const healthIssue = healthItems.some((h) => h.status === "down" || h.status === "warn");
+  const statusText = (s: string) => (s === "ok" ? "funciona" : s === "warn" ? "con problemas" : s === "down" ? "caído" : "sin datos");
+  const statusColor = (s: string) => (s === "ok" ? "text-ok" : s === "warn" ? "text-aviso" : s === "down" ? "text-falla" : "text-niebla");
+
+  const vramPct = gpu?.vram_used_mb != null && gpu.vram_total_mb ? (gpu.vram_used_mb / gpu.vram_total_mb) * 100 : null;
+  const gpuHot = (gpu?.temp_c ?? 0) >= 80;
+  const vramTight = (vramPct ?? 0) >= 92;
+  const gb = (mb: number | null | undefined) => (mb == null ? "—" : fmtDec(mb / 1024, 1));
+  const cpuHigh = (system?.cpu_pct ?? 0) >= 90;
+
+  const lowBalance = cloud?.balance_usd != null && cloud.balance_usd < 2;
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100">
+    <div className="min-h-screen bg-cielo text-luz">
       <div
         className="pointer-events-none fixed inset-x-0 top-0 z-10 flex justify-center"
         style={{
@@ -445,150 +709,250 @@ export default function Home() {
           transition: pull === 0 || refreshing ? "transform 250ms ease, opacity 250ms ease" : "none",
         }}
       >
-        <div className="mt-2 flex h-9 w-9 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900 shadow-lg">
+        <div className="mt-2 flex h-9 w-9 items-center justify-center rounded-full bg-sup shadow-lg ring-1 ring-linea">
           <Spinner
-            className={`h-5 w-5 ${pullReady || refreshing ? "text-sky-400" : "text-zinc-400"} ${
-              refreshing ? "animate-spin" : ""
-            }`}
+            className={`h-5 w-5 ${pullReady || refreshing ? "text-oro" : "text-niebla"} ${refreshing ? "motion-safe:animate-spin" : ""}`}
             style={refreshing ? undefined : { transform: `rotate(${pull * 4}deg)` }}
           />
         </div>
       </div>
 
       <div
-        className="px-4 py-6"
+        className="mx-auto max-w-5xl px-4 pb-16 pt-6"
         style={{
           transform: `translateY(${pull}px)`,
           transition: pull === 0 || refreshing ? "transform 250ms ease" : "none",
         }}
       >
-        <div className="mb-6 flex flex-wrap items-center justify-between gap-2">
-          <h1 className="text-xl font-semibold">✦ Hermes Stars</h1>
+        <header className="mb-6 flex flex-wrap items-center justify-between gap-2">
+          <h1 className="font-display text-2xl font-semibold tracking-tight">
+            <span className="text-oro" aria-hidden="true">
+              ✦
+            </span>{" "}
+            Hermes Stars
+          </h1>
           <LiveIndicator lastOkAt={lastOkAt} failing={failing} fetching={fetching || refreshing} />
-        </div>
+        </header>
 
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <Card title="Modelo local · Qwen3.6-35B" stale={isStale(model?.ts)} loading={loading} flashKey={model?.ts}>
-            <div className="flex items-center gap-2">
-              {modelView.busy ? (
-                <Spinner className="h-5 w-5 shrink-0 animate-spin text-sky-400" />
-              ) : (
-                <span
-                  className={`h-2.5 w-2.5 shrink-0 rounded-full ${
-                    modelView.tone === "ok" ? "bg-emerald-400" : modelView.tone === "down" ? "bg-red-400" : "bg-amber-400"
-                  }`}
-                />
-              )}
-              <p className="text-xl font-bold">{modelView.title}</p>
-            </div>
-            <p className="mt-1 text-sm text-zinc-300">{modelView.detail}</p>
-            {modelView.progress != null && (
-              <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-zinc-800">
-                <div
-                  className="h-full rounded-full bg-sky-400 transition-all duration-500"
-                  style={{ width: `${Math.round(modelView.progress * 100)}%` }}
-                />
-              </div>
-            )}
-            <ContextBar model={model} />
-            <p className="mt-2 text-xs text-zinc-500">{timeAgo(model?.ts)}</p>
-          </Card>
-
-          <Card title="Nube · OpenRouter" stale={isStale(cloud?.ts, 180)} loading={loading} flashKey={cloud?.ts}>
-            <div className="flex items-baseline justify-between">
-              <p className="text-xl font-bold">{fmtUsd(cloud?.balance_usd)}</p>
-              <span className="text-xs text-zinc-500">saldo de la cuenta</span>
-            </div>
-            <p className="text-sm text-zinc-400">
-              Gastado hoy {fmtUsd(cloud?.spend_day_usd)} · semana {fmtUsd(cloud?.spend_week_usd)} · mes{" "}
-              {fmtUsd(cloud?.spend_month_usd)}
-            </p>
-
-            <div className="mt-3 border-t border-zinc-800 pt-2">
-              <p className="text-xs uppercase tracking-wide text-zinc-500">Compresión</p>
-              <p className="text-sm text-zinc-200">{shortModel(cloud?.compression_model)}</p>
-              <p className="text-sm text-zinc-400">
-                {cloud?.compression_count_24h ?? 0} en 24 h
-                {cloud?.last_compression_ts && (
-                  <>
-                    {" "}· última {timeAgo(cloud.last_compression_ts)}, tardó {fmtDuration(cloud.last_compression_s)}
-                    {cloud.last_compression_tokens != null && ` (${fmtInt(cloud.last_compression_tokens)} tokens)`}
-                    {cloud.last_compression_model &&
-                      cloud.last_compression_model !== cloud.compression_model &&
-                      ` con ${shortModel(cloud.last_compression_model)}`}
-                  </>
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+          <div className="space-y-4">
+            <section className="rounded-2xl bg-sup px-5 py-5 ring-1 ring-linea">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm text-niebla">Orión ahora · Qwen3.6-35B</p>
+                  {loading ? (
+                    <div className="mt-3">
+                      <Skeleton />
+                    </div>
+                  ) : (
+                    <>
+                      <div className="mt-1 flex items-center gap-2.5">
+                        {modelView.busy ? (
+                          <Spinner className="h-6 w-6 shrink-0 motion-safe:animate-spin text-oro" />
+                        ) : (
+                          <span
+                            className={`h-3 w-3 shrink-0 rounded-full ${
+                              modelView.tone === "ok" ? "bg-ok" : modelView.tone === "down" ? "bg-falla" : "bg-aviso"
+                            }`}
+                          />
+                        )}
+                        <p className="font-display text-3xl font-semibold leading-tight tracking-tight">{modelView.title}</p>
+                      </div>
+                      <p className="num mt-1.5 max-w-prose text-[15px] text-luz/90">{modelView.detail}</p>
+                      {modelView.progress != null && (
+                        <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-cielo">
+                          <div
+                            className="h-full rounded-full bg-astro transition-all duration-500 motion-reduce:transition-none"
+                            style={{ width: `${Math.round(modelView.progress * 100)}%` }}
+                          />
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+                {!loading && isStale(model?.ts) && (
+                  <span className="shrink-0 rounded-full bg-aviso/15 px-2 py-0.5 text-xs text-aviso">sin datos recientes</span>
                 )}
-              </p>
-            </div>
+              </div>
 
-            <div className="mt-2 border-t border-zinc-800 pt-2">
-              <p className="text-xs uppercase tracking-wide text-zinc-500">Respaldo si el modelo local falla</p>
-              <p className="text-sm text-zinc-200">
-                {cloud?.fallback_chain ? cloud.fallback_chain.split(" → ").map(shortModel).join(" → ") : "—"}
-              </p>
-              <p className="text-sm text-zinc-400">
-                {cloud?.fallback_count_24h
-                  ? `Usado ${cloud.fallback_count_24h} ${cloud.fallback_count_24h === 1 ? "vez" : "veces"} en 24 h · último ${timeAgo(
-                      cloud.last_fallback_ts ?? undefined,
-                    )} (${shortModel(cloud.last_fallback_model)})`
-                  : "No se usó en las últimas 24 h"}
-              </p>
-            </div>
-            <p className="mt-2 text-xs text-zinc-500">{timeAgo(cloud?.ts)}</p>
-          </Card>
+              {!loading && heroTurn && (
+                <div className="mt-5 border-t border-linea/70 pt-4">
+                  <p className="text-sm text-niebla">
+                    {heroIsLive ? "Turno en curso" : "Último turno"} · {platformName(heroTurn.platform)} · {fmtClock(heroTurn.started_at)}
+                    {heroIsLive && heroTurn.total_s != null && <span className="num"> · lleva {fmtDuration(heroTurn.total_s)}</span>}
+                  </p>
+                  <Constellation turn={heroTurn} />
+                </div>
+              )}
+              {!loading && !heroTurn && (
+                <p className="mt-5 border-t border-linea/70 pt-4 text-sm text-niebla">
+                  Todavía no hay turnos registrados. Aparecen cuando le escribas a Orión.
+                </p>
+              )}
 
-          <Card title="GPU" stale={isStale(gpu?.ts)} loading={loading} flashKey={gpu?.ts}>
-            <p className="text-2xl font-bold">{gpu?.util_pct != null ? `${gpu.util_pct}%` : "—"}</p>
-            <p className="text-sm text-zinc-400">
-              VRAM: {gpu?.vram_used_mb ?? "—"} / {gpu?.vram_total_mb ?? "—"} MB
-            </p>
-            <p className="text-sm text-zinc-400">
-              {gpu?.temp_c != null ? `${gpu.temp_c}°C` : "—"} · {gpu?.power_w != null ? `${gpu.power_w}W` : "—"}
-            </p>
-            <p className="mt-1 text-xs text-zinc-500">{timeAgo(gpu?.ts)}</p>
-          </Card>
+              {!loading && <ContextBar model={model} />}
 
-          <Card title="PC (CPU / RAM)" stale={isStale(system?.ts)} loading={loading} flashKey={system?.ts}>
-            <p className="text-2xl font-bold">{system?.cpu_pct != null ? `${system.cpu_pct}% CPU` : "—"}</p>
-            <p className="text-sm text-zinc-400">
-              RAM: {system?.ram_used_mb ?? "—"} / {system?.ram_total_mb ?? "—"} MB
-            </p>
-            <p className="mt-1 text-xs text-zinc-500">{timeAgo(system?.ts)}</p>
-          </Card>
+              {!loading && cloud && (
+                <div className="mt-5 space-y-2 border-t border-linea/70 pt-4 text-sm">
+                  <div className="flex flex-wrap items-baseline justify-between gap-x-4">
+                    <span className="text-niebla">Respaldo si el modelo local falla</span>
+                    <span className="text-luz">
+                      {cloud.fallback_chain ? cloud.fallback_chain.split(" → ").map(shortModel).join(" → ") : "—"}
+                    </span>
+                  </div>
+                  <p className={`num ${cloud.fallback_count_24h ? "text-aviso" : "text-niebla"}`}>
+                    {cloud.fallback_count_24h
+                      ? `Se usó ${cloud.fallback_count_24h} ${cloud.fallback_count_24h === 1 ? "vez" : "veces"} en 24 h; la última ${timeAgo(cloud.last_fallback_ts)} (${shortModel(cloud.last_fallback_model)}).`
+                      : "No se usó en las últimas 24 h."}
+                  </p>
+                  <div className="flex flex-wrap items-baseline justify-between gap-x-4 pt-1">
+                    <span className="text-niebla">Resume la conversación con</span>
+                    <span className="text-luz">{shortModel(cloud.compression_model)}</span>
+                  </div>
+                  <p className="num text-niebla">
+                    {cloud.compression_count_24h ?? 0} en 24 h
+                    {cloud.last_compression_ts && `; la última tardó ${fmtDuration(cloud.last_compression_s)} (${timeAgo(cloud.last_compression_ts)})`}.
+                  </p>
+                </div>
+              )}
+            </section>
 
-          <Card
-            title="Servicios"
-            stale={services.length === 0}
-            loading={loading}
-            flashKey={services.map((s) => `${s.service}:${s.status}`).join("|")}
-          >
-            <ul className="space-y-1 text-sm">
-              {services.length === 0 && <li className="text-zinc-500">sin datos</li>}
-              {services.map((s) => (
-                <li key={s.service} className="flex items-center justify-between">
-                  <span>{s.service}</span>
-                  <span
-                    className={
-                      s.status === "ok" ? "text-emerald-400" : s.status === "warn" ? "text-amber-400" : "text-red-400"
-                    }
-                  >
-                    {s.status}
+            <Section title="Últimos turnos">
+              {turns.length === 0 ? (
+                <p className="text-sm text-niebla">Sin turnos todavía.</p>
+              ) : (
+                <ul className="divide-y divide-linea/60">
+                  {turns.map((t) => {
+                    const cause = turnCause(t);
+                    return (
+                      <li key={t.turn_key}>
+                        <Fold
+                          summary={
+                            <span className="flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+                              <span className="num text-sm text-niebla">{fmtClock(t.started_at)}</span>
+                              <span className="text-[15px] text-luz">{platformName(t.platform)}</span>
+                              <span
+                                className={`num text-[15px] font-medium ${
+                                  t.status === "active" ? "text-oro" : t.status === "interrupted" ? "text-falla" : "text-luz"
+                                }`}
+                              >
+                                {t.status === "active"
+                                  ? `en curso · ${fmtDuration(t.total_s)}`
+                                  : t.status === "interrupted"
+                                    ? `cortado · ${fmtDuration(t.total_s)}`
+                                    : fmtDuration(t.total_s)}
+                              </span>
+                              {cause && <span className="text-xs text-aviso">{cause}</span>}
+                            </span>
+                          }
+                        >
+                          <PhaseBars t={t} />
+                        </Fold>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </Section>
+          </div>
+
+          <div className="space-y-4">
+            <Section title="Salud">
+              <Fold
+                forceOpen={healthIssue}
+                summary={
+                  <span className="flex items-center gap-2.5">
+                    <span className={`h-2.5 w-2.5 rounded-full ${healthIssue ? "bg-falla" : "bg-ok"}`} />
+                    <span className="text-[15px]">{loading ? "Revisando…" : healthIssue ? "Algo no funciona" : "Todo en orden"}</span>
                   </span>
-                </li>
-              ))}
-            </ul>
-          </Card>
+                }
+              >
+                <ul className="space-y-1.5 text-sm">
+                  {healthItems.map((h) => (
+                    <li key={h.name} className="flex items-center justify-between gap-3">
+                      <span className="text-niebla">{h.name}</span>
+                      <span className={statusColor(h.status)}>{statusText(h.status)}</span>
+                    </li>
+                  ))}
+                </ul>
+              </Fold>
+            </Section>
 
-          <Card title="Eventos en vivo" stale={events.length === 0} loading={loading} flashKey={events[0]?.ts}>
-            <ul className="max-h-64 space-y-1 overflow-y-auto text-sm">
-              {events.length === 0 && <li className="text-zinc-500">sin eventos</li>}
-              {events.map((e, i) => (
-                <li key={`${e.ts}-${i}`} className="border-b border-zinc-800 pb-1 last:border-0">
-                  <span className="text-zinc-500">{timeAgo(e.ts)}</span> — {e.message}
-                </li>
-              ))}
-            </ul>
-          </Card>
+            <Section title="Recursos del PC" stale={!loading && (isStale(gpu?.ts) || isStale(system?.ts))}>
+              {loading ? (
+                <Skeleton />
+              ) : (
+                <div className="space-y-4">
+                  <div>
+                    <div className="flex items-baseline justify-between gap-3">
+                      <span className="text-sm text-niebla">GPU</span>
+                      <span className="num font-display text-2xl font-semibold">{gpu?.util_pct != null ? `${Math.round(gpu.util_pct)} %` : "—"}</span>
+                    </div>
+                    <Sparkline values={gpuHist} max={100} tone="#a78bfa" />
+                    <p className="num mt-1 text-sm text-niebla">
+                      Memoria de video{" "}
+                      <span className={vramTight ? "text-aviso" : "text-luz"}>
+                        {gb(gpu?.vram_used_mb)} de {gb(gpu?.vram_total_mb)} GB
+                      </span>
+                      {" · "}
+                      <span className={gpuHot ? "text-falla" : "text-luz"}>{gpu?.temp_c != null ? `${Math.round(gpu.temp_c)} °C` : "—"}</span>
+                      {" · "}
+                      {gpu?.power_w != null ? `${Math.round(gpu.power_w)} W` : "—"}
+                    </p>
+                    {vramTight && <p className="mt-0.5 text-xs text-aviso">Memoria de video casi llena: la pantalla puede fallar.</p>}
+                  </div>
+                  <div>
+                    <div className="flex items-baseline justify-between gap-3">
+                      <span className="text-sm text-niebla">Procesador</span>
+                      <span className={`num font-display text-2xl font-semibold ${cpuHigh ? "text-aviso" : ""}`}>
+                        {system?.cpu_pct != null ? `${Math.round(system.cpu_pct)} %` : "—"}
+                      </span>
+                    </div>
+                    <Sparkline values={cpuHist} max={100} tone="#6ee7b7" />
+                    <p className="num mt-1 text-sm text-niebla">
+                      RAM {gb(system?.ram_used_mb)} de {gb(system?.ram_total_mb)} GB
+                    </p>
+                  </div>
+                  <p className="text-xs text-niebla">Gráficos de los últimos ~7 minutos.</p>
+                </div>
+              )}
+            </Section>
+
+            <Section title="Nube" stale={!loading && isStale(cloud?.ts, 180)}>
+              {loading ? (
+                <Skeleton />
+              ) : (
+                <>
+                  <div className="flex items-baseline justify-between gap-3">
+                    <span className={`num font-display text-2xl font-semibold ${lowBalance ? "text-aviso" : ""}`}>
+                      {fmtUsd(cloud?.balance_usd)}
+                    </span>
+                    <span className="text-sm text-niebla">saldo en OpenRouter</span>
+                  </div>
+                  <p className="num text-sm text-niebla">
+                    Gastado: hoy {fmtUsd(cloud?.spend_day_usd)}, semana {fmtUsd(cloud?.spend_week_usd)}, mes {fmtUsd(cloud?.spend_month_usd)}.
+                  </p>
+                  {lowBalance && <p className="mt-1 text-xs text-aviso">Saldo bajo: conviene recargar.</p>}
+                </>
+              )}
+            </Section>
+
+            <Section title="Registro técnico">
+              <Fold summary={<span className="text-[15px] text-niebla">{events.length} eventos recientes</span>}>
+                <ul className="max-h-72 space-y-1.5 overflow-y-auto pr-1 text-sm">
+                  {events.length === 0 && <li className="text-niebla">Sin eventos.</li>}
+                  {events.map((e, i) => (
+                    <li key={`${e.ts}-${i}`} className="leading-snug">
+                      <span className="num text-niebla">{fmtClock(e.ts)}</span>{" "}
+                      <span className={e.severity === "error" ? "text-falla" : e.severity === "warn" ? "text-aviso" : "text-luz/90"}>
+                        {e.message}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </Fold>
+            </Section>
+          </div>
         </div>
       </div>
     </div>

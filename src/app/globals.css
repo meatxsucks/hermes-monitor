@@ -1,31 +1,57 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --color-cielo: #0f1631;
+  --color-sup: #18224a;
+  --color-linea: #2a3670;
+  --color-luz: #f1e8cf;
+  --color-niebla: #9aa3c7;
+  --color-astro: #a78bfa;
+  --color-oro: #fde68a;
+  --color-ok: #6ee7b7;
+  --color-aviso: #f5b84b;
+  --color-falla: #f87171;
+  --font-display: var(--font-display), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-body), ui-sans-serif, system-ui, sans-serif;
 }
 
 html,
 body {
-  background: #09090b;
+  background: #0f1631;
+  color: #f1e8cf;
   overscroll-behavior-y: contain;
+  font-family: var(--font-body), ui-sans-serif, system-ui, sans-serif;
 }
 
-body {
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.font-display {
+  font-family: var(--font-display), ui-sans-serif, system-ui, sans-serif;
+  font-variation-settings: "wdth" 90;
+}
+
+@keyframes estrella {
+  0%,
+  100% {
+    r: 7;
+    opacity: 1;
+  }
+  50% {
+    r: 10;
+    opacity: 0.55;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .estrella-activa {
+    animation: estrella 1.6s ease-in-out infinite;
+  }
+}
+
+:focus-visible {
+  outline: 2px solid #fde68a;
+  outline-offset: 2px;
+  border-radius: 4px;
 }

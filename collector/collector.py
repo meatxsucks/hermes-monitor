@@ -129,6 +129,135 @@ def collect_system() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Turnos: cada mensaje entrante hasta su respuesta, con el desglose de fases
+# ---------------------------------------------------------------------------
+
+TURN_STALE_S = 45 * 60
+
+
+class TurnTracker:
+    """Arma cada turno (mensaje -> respuesta) con metadata de los logs y lo publica en la tabla turns."""
+
+    def __init__(self):
+        self.active: dict[str, dict] = {}
+
+    def _new(self, platform: str) -> dict:
+        started = datetime.now(timezone.utc)
+        return {
+            "turn_key": f"{platform}:{started.isoformat()}",
+            "platform": platform,
+            "started_at": started.isoformat(),
+            "_t0": time.time(),
+            "status": "active",
+            "phase": "read",
+            "read_s": 0.0,
+            "write_s": 0.0,
+            "tools_s": 0.0,
+            "compress_s": 0.0,
+            "api_calls": 0,
+            "tokens_in": None,
+            "tokens_out": 0,
+            "cache_pct": None,
+            "tools": {},
+            "tool_errors": 0,
+            "compressed": False,
+            "fallback_used": False,
+        }
+
+    def current(self) -> dict | None:
+        if not self.active:
+            return None
+        return max(self.active.values(), key=lambda t: t["_t0"])
+
+    def start(self, platform: str):
+        if platform in self.active:
+            self._finish(platform, "interrupted")
+        self.active[platform] = self._new(platform)
+        self._push(self.active[platform])
+
+    def end(self, platform: str, total_s: float):
+        turn = self.active.get(platform)
+        if turn:
+            turn["total_s"] = round(total_s, 1)
+            self._finish(platform, "done")
+
+    def interrupt_all(self):
+        for platform in list(self.active):
+            self._finish(platform, "interrupted")
+
+    def _finish(self, platform: str, status: str):
+        turn = self.active.pop(platform)
+        turn["status"] = status
+        turn["phase"] = None
+        turn["ended_at"] = now_iso()
+        turn.setdefault("total_s", round(time.time() - turn["_t0"], 1))
+        self._push(turn)
+
+    def on_api_call(self, tokens_in: int, tokens_out: int, cache_pct: float | None):
+        turn = self.current()
+        if turn:
+            turn["api_calls"] += 1
+            turn["tokens_in"] = tokens_in
+            turn["tokens_out"] += tokens_out
+            if cache_pct is not None:
+                turn["cache_pct"] = cache_pct
+
+    def on_tool(self, name: str, seconds: float, error: bool):
+        turn = self.current()
+        if turn:
+            turn["tools"][name] = turn["tools"].get(name, 0) + 1
+            turn["tools_s"] = round(turn["tools_s"] + seconds, 2)
+            if error:
+                turn["tool_errors"] += 1
+
+    def on_compression(self, seconds: float | None):
+        turn = self.current()
+        if turn:
+            turn["compressed"] = True
+            if seconds:
+                turn["compress_s"] = round(turn["compress_s"] + seconds, 1)
+
+    def on_fallback(self):
+        turn = self.current()
+        if turn:
+            turn["fallback_used"] = True
+
+    def sample(self, activity: str | None, compressing: bool, dt: float):
+        """Suma el tiempo transcurrido a la fase en que está el turno más reciente y publica su estado."""
+        turn = self.current()
+        if not turn:
+            return
+        if compressing:
+            turn["phase"] = "compress"
+        elif activity == "prompt":
+            turn["phase"] = "read"
+            turn["read_s"] = round(turn["read_s"] + dt, 1)
+        elif activity == "generating":
+            turn["phase"] = "write"
+            turn["write_s"] = round(turn["write_s"] + dt, 1)
+        else:
+            turn["phase"] = "tools"
+        for platform, t in list(self.active.items()):
+            if time.time() - t["_t0"] > TURN_STALE_S:
+                self._finish(platform, "interrupted")
+        if turn["platform"] in self.active:
+            turn["total_s"] = round(time.time() - turn["_t0"], 1)
+            self._push(turn)
+
+    @staticmethod
+    def _push(turn: dict):
+        row = {k: v for k, v in turn.items() if not k.startswith("_")}
+        row["updated_at"] = now_iso()
+        try:
+            sb.table("turns").upsert(row, on_conflict="turn_key").execute()
+        except Exception as exc:
+            print(f"[collector] upsert turn failed: {exc}")
+
+
+turns = TurnTracker()
+
+
+# ---------------------------------------------------------------------------
 # Modelo local: actividad y velocidades reales medidas entre muestras
 # ---------------------------------------------------------------------------
 
@@ -189,6 +318,7 @@ class ModelTracker:
 
 
 model_tracker = ModelTracker()
+_last_model_sample = [0.0]
 
 
 def collect_model(gateway: "GatewayTailer", agent: "AgentTailer") -> None:
@@ -222,6 +352,10 @@ def collect_model(gateway: "GatewayTailer", agent: "AgentTailer") -> None:
             row["ctx_used"] = slot.get("n_prompt_tokens")
             row["ctx_total"] = slot.get("n_ctx")
             row.update(model_tracker.update(slot))
+            if row.get("activity") in ("prompt", "generating"):
+                gateway.context_cleared = False
+            elif gateway.context_cleared:
+                row["ctx_used"] = 0
     except Exception:
         pass  # /slots puede no estar habilitado (--no-slots)
 
@@ -230,6 +364,10 @@ def collect_model(gateway: "GatewayTailer", agent: "AgentTailer") -> None:
         row["task_elapsed_s"] = turn_elapsed
 
     insert("model_metrics", row)
+    now = time.time()
+    dt = now - _last_model_sample[0] if _last_model_sample[0] else 0.0
+    _last_model_sample[0] = now
+    turns.sample(row.get("activity"), bool(row.get("compress_since")), min(dt, 30.0))
     set_service_status("llm (modelo local)", "ok" if status == "ok" else "warn" if status == "loading" else "down")
 
 
@@ -292,6 +430,8 @@ WHATSAPP_PAIR_RE = re.compile(r"WhatsApp enabled but not paired")
 TELEGRAM_TIMEOUT_RE = re.compile(r"\[Telegram\].*Timed ?Out", re.IGNORECASE)
 COMPACT_START_RE = re.compile(r"Compacting context — summarizing")
 COMPACT_TICK_RE = re.compile(r"Compacting context — still summarizing")
+GATEWAY_UP_RE = re.compile(r"gateway\.run: ✓ \S+ connected")
+SESSION_RESET_RE = re.compile(r"Invalidated run generation .*\(session_reset\)")
 
 
 class GatewayTailer(LogTailer):
@@ -300,6 +440,7 @@ class GatewayTailer(LogTailer):
         self.pending_since: dict[str, float] = {}
         self.last_pending_notice = 0.0
         self.last_response_s: float | None = None
+        self.context_cleared = False
 
     def turn_elapsed(self) -> float | None:
         if not self.pending_since:
@@ -325,6 +466,7 @@ class GatewayTailer(LogTailer):
         m = INBOUND_RE.search(line)
         if m:
             self.pending_since[m.group(1)] = time.time()
+            turns.start(m.group(1))
             emit_event("inbound", f"Mensaje entrante por {m.group(1)}")
             return
 
@@ -333,7 +475,17 @@ class GatewayTailer(LogTailer):
             platform, seconds = m.group(1), float(m.group(2))
             self.pending_since.pop(platform, None)
             self.last_response_s = seconds
+            turns.end(platform, seconds)
             emit_event("response", f"Orión respondió por {platform} en {seconds:.0f}s")
+            return
+
+        if SESSION_RESET_RE.search(line):
+            self.context_cleared = True
+            return
+
+        if GATEWAY_UP_RE.search(line):
+            self.pending_since.clear()
+            turns.interrupt_all()
             return
 
         if COMPACT_START_RE.search(line):
@@ -355,9 +507,14 @@ LINE_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 FALLBACK_RE = re.compile(r"Fallback activated: .+? → (\S+) \((\w+)\)")
 TELEMETRY_RE = re.compile(r"context compression attempt telemetry: (\{.*\})")
 THRESHOLD_RE = re.compile(r"threshold=([\d,]+)")
+API_CALL_RE = re.compile(r"API call #\d+: .*? in=(\d+) out=(\d+).*?(?:cache=\d+/\d+ \((\d+)%\))?")
+TOOL_OK_RE = re.compile(r"tool (\S+) completed \(([\d.]+)s")
+TOOL_ERR_RE = re.compile(r"Tool (\S+) returned error \(([\d.]+)s\)")
 COMP_STARTED_RE = re.compile(r"context compression started")
 COMP_USING_RE = re.compile(r"Auxiliary compression: using (\S+) \(([^)]+)\)")
-COMP_DONE_RE = re.compile(r"context compression (done|failed|aborted)")
+COMP_DONE_RE = re.compile(
+    r"context compression (done|failed|aborted)|Compression made no progress|context compression attempt telemetry|Turn ended"
+)
 COMPRESSION_STALE_S = 20 * 60
 
 
@@ -417,6 +574,20 @@ class AgentTailer(LogTailer):
         if m:
             self.compress_threshold = int(m.group(1).replace(",", ""))
 
+        if live:
+            m = API_CALL_RE.search(line)
+            if m:
+                turns.on_api_call(int(m.group(1)), int(m.group(2)), float(m.group(3)) if m.group(3) else None)
+                return
+            m = TOOL_OK_RE.search(line)
+            if m:
+                turns.on_tool(m.group(1), float(m.group(2)), error=False)
+                return
+            m = TOOL_ERR_RE.search(line)
+            if m:
+                turns.on_tool(m.group(1), float(m.group(2)), error=True)
+                return
+
         if COMP_STARTED_RE.search(line):
             self.compressing_since = _line_time(line) or datetime.now().astimezone()
             self.compressing_model = self.compressing_provider = None
@@ -429,7 +600,6 @@ class AgentTailer(LogTailer):
 
         if COMP_DONE_RE.search(line):
             self.compressing_since = None
-            return
 
         m = FALLBACK_RE.search(line)
         if m:
@@ -437,6 +607,7 @@ class AgentTailer(LogTailer):
             self.fallback_times.append(ts)
             self.last_fallback_model = m.group(1)
             if live:
+                turns.on_fallback()
                 emit_event("fallback", f"Orión pasó al modelo de respaldo {m.group(1)}", severity="warn")
             return
 
@@ -460,6 +631,7 @@ class AgentTailer(LogTailer):
                 "tokens": data.get("aux_prompt_tokens"),
             }
             if live:
+                turns.on_compression(seconds)
                 took = f" en {seconds:.0f}s" if seconds is not None else ""
                 emit_event("compressed", f"Contexto comprimido con {data.get('aux_model')}{took}")
 
