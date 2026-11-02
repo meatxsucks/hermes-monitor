@@ -302,7 +302,7 @@ function Constellation({ turn }: { turn: TurnRow }) {
   const reached = nodes.filter((n) => n.state !== "pending").length;
   return (
     <div className="mt-5">
-      <svg viewBox={`0 0 ${width} 62`} className="w-full" role="img" aria-label="Fases del turno de Orión">
+      <svg viewBox={`0 0 ${width} 62`} className="mx-auto w-full max-w-md" role="img" aria-label="Fases del turno de Orión">
         {nodes.slice(0, -1).map((_, i) => (
           <line
             key={i}
@@ -718,13 +718,15 @@ export default function Home() {
       </div>
 
       <div
-        className="mx-auto max-w-5xl px-4 pb-16 pt-6"
+        className="mx-auto max-w-5xl pb-16 pt-6 [@media(max-height:500px)]:pb-8 [@media(max-height:500px)]:pt-3"
         style={{
+          paddingLeft: "max(1rem, env(safe-area-inset-left))",
+          paddingRight: "max(1rem, env(safe-area-inset-right))",
           transform: `translateY(${pull}px)`,
           transition: pull === 0 || refreshing ? "transform 250ms ease" : "none",
         }}
       >
-        <header className="mb-6 flex flex-wrap items-center justify-between gap-2">
+        <header className="mb-6 [@media(max-height:500px)]:mb-3 flex flex-wrap items-center justify-between gap-2">
           <h1 className="font-display text-2xl font-semibold tracking-tight">
             <span className="text-oro" aria-hidden="true">
               ✦
@@ -734,9 +736,9 @@ export default function Home() {
           <LiveIndicator lastOkAt={lastOkAt} failing={failing} fetching={fetching || refreshing} />
         </header>
 
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
+        <div className="grid gap-4 min-[700px]:grid-cols-[minmax(0,3fr)_minmax(0,2fr)] min-[700px]:items-start">
           <div className="space-y-4">
-            <section className="rounded-2xl bg-sup px-5 py-5 ring-1 ring-linea">
+            <section className="rounded-2xl bg-sup px-5 py-5 ring-1 ring-linea [@media(max-height:500px)]:py-3">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <p className="text-sm text-niebla">Orión ahora · Qwen3.6-35B</p>
@@ -817,7 +819,7 @@ export default function Home() {
               )}
             </section>
 
-            <div className="grid gap-4 sm:grid-cols-2">
+            <div className="grid gap-4 min-[1000px]:grid-cols-2">
               <Section title="OpenRouter" stale={!loading && isStale(cloud?.ts, 180)}>
                 {loading ? (
                   <Skeleton />
