@@ -1,0 +1,14 @@
+[Unit]
+Description=hermes-monitor collector - sube métricas del asistente a Supabase
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=RUTA/hermes-monitor/collector
+EnvironmentFile=RUTA/hermes-monitor/collector/.env
+ExecStart=RUTA/hermes-monitor/collector/venv/bin/python collector.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
